@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gwapi-graph
+  namespace: gwapi-graph
+  labels:
+    app: gwapi-graph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gwapi-graph
+  template:
+    metadata:
+      labels:
+        app: gwapi-graph
+    spec:
+      serviceAccountName: gwapi-graph
+      containers:
+      - name: gwapi-graph
+        image: gwapi-graph:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: GIN_MODE
+          value: "release"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1001
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gwapi-graph
+  namespace: gwapi-graph
+  labels:
+    app: gwapi-graph
+spec:
+  selector:
+    app: gwapi-graph
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gwapi-graph
+  labels:
+    name: gwapi-graph
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gwapi-graph
+  namespace: gwapi-graph
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gwapi-graph
+rules:
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources:
+  - gatewayclasses
+  - gateways
+  - httproutes
+  - referencegrants
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gwapi-graph
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gwapi-graph
+subjects:
+- kind: ServiceAccount
+  name: gwapi-graph
+  namespace: gwapi-graph 

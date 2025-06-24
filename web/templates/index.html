@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.title}}</title>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>{{.title}}</h1>
+            <div class="controls">
+                <button id="refresh-btn">Refresh</button>
+                <button id="auto-refresh-btn">Auto Refresh: OFF</button>
+                <button id="reset-zoom-btn">Reset Zoom</button>
+                <select id="layout-select">
+                    <option value="force">Force Layout</option>
+                    <option value="radial">Radial Layout</option>
+                    <option value="hierarchical">Hierarchical Layout</option>
+                </select>
+            </div>
+        </header>
+        <div id="legend">
+            <h3>Legend</h3>
+            <div class="legend-item">
+                <div class="legend-color gatewayclass"></div>
+                <span>GatewayClass</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color gateway"></div>
+                <span>Gateway</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color httproute"></div>
+                <span>HTTPRoute</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color referencegrant"></div>
+                <span>ReferenceGrant</span>
+            </div>
+        </div>
+        <div id="graph-container">
+            <svg id="graph"></svg>
+        </div>
+        <div id="info-panel">
+            <h3>Resource Details</h3>
+            <div id="info-content">
+                <p>Click on a node to see resource details</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html> 
