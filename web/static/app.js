@@ -246,6 +246,9 @@ class GatewayGraphVisualizer {
                 case 'Gateway':
                     node.hierarchyLevel = 1;
                     break;
+                case 'Listener':
+                    node.hierarchyLevel = 1.2; // Between Gateway and HTTPRoute
+                    break;
                 case 'HTTPRoute':
                     node.hierarchyLevel = 2;
                     break;
@@ -334,9 +337,12 @@ class GatewayGraphVisualizer {
             .attr('class', 'nodes')
             .merge(nodeSelection);
 
+        // Filter out hidden nodes unless they should be shown
+        const visibleNodes = this.nodes.filter(node => !node.hidden);
+        
         // Bind actual node data
         const nodes = nodesContainer.selectAll('.node-group')
-            .data(this.nodes, d => d.id);
+            .data(visibleNodes, d => d.id);
 
         // Remove old nodes
         const exitingNodes = nodes.exit();
@@ -360,7 +366,7 @@ class GatewayGraphVisualizer {
         newNodes.append('circle')
             .attr('r', d => this.getNodeRadius(d))
             .attr('class', d => `node ${d.type.toLowerCase()}`)
-            .on('click', (event, d) => this.selectNode(d))
+            .on('click', (event, d) => this.handleNodeClick(event, d))
             .on('mouseover', (event, d) => this.showTooltip(event, this.getNodeTooltip(d)))
             .on('mouseout', () => this.hideTooltip());
 
@@ -405,13 +411,45 @@ class GatewayGraphVisualizer {
             'HTTPRoute': 1.0,
             'DNSRecord': 0.9,
             'Service': 1.1,
-            'ReferenceGrant': 0.8
+            'ReferenceGrant': 0.8,
+            'Listener': 0.7
         };
         return baseRadius * (typeMultipliers[d.type] || 1.0);
     }
 
     getNodeTooltip(d) {
+        if (d.type === 'Listener' && d.listenerData) {
+            return `${d.type}: ${d.name} (Port ${d.listenerData.port}, ${d.listenerData.protocol}${d.listenerData.hostname ? `, ${d.listenerData.hostname}` : ''})`;
+        }
         return `${d.type}: ${d.name}${d.namespace ? ` (${d.namespace})` : ''}`;
+    }
+
+    handleNodeClick(event, node) {
+        // Standard node selection (removed gateway listener toggling)
+        this.selectNode(node);
+    }
+
+    toggleGatewayListeners(gateway) {
+        // Find all listener nodes for this gateway
+        const listenerNodes = this.nodes.filter(node => 
+            node.type === 'Listener' && node.parentId === gateway.id
+        );
+
+        if (listenerNodes.length === 0) return;
+
+        // Toggle visibility of listener nodes
+        const shouldShow = listenerNodes[0].hidden;
+        listenerNodes.forEach(listener => {
+            listener.hidden = !shouldShow;
+        });
+
+        // Re-render the graph to show/hide listeners
+        this.render();
+        
+        // Restart simulation with gentle alpha to animate new nodes
+        if (shouldShow) {
+            this.simulation.alpha(0.2).restart();
+        }
     }
 
     selectNode(node) {
@@ -435,7 +473,7 @@ class GatewayGraphVisualizer {
             return;
         }
 
-        const html = `
+        let html = `
             <h4>${node.type}</h4>
             <div class="key-value">
                 <span class="key">Name:</span>
@@ -457,6 +495,54 @@ class GatewayGraphVisualizer {
                 <span class="key">Version:</span>
                 <span class="value">${node.version}</span>
             </div>
+        `;
+
+        // Add listener-specific information
+        if (node.type === 'Listener' && node.listenerData) {
+            html += `
+                <div class="key-value">
+                    <span class="key">Port:</span>
+                    <span class="value">${node.listenerData.port}</span>
+                </div>
+                <div class="key-value">
+                    <span class="key">Protocol:</span>
+                    <span class="value">${node.listenerData.protocol}</span>
+                </div>
+            `;
+            
+            if (node.listenerData.hostname) {
+                html += `
+                    <div class="key-value">
+                        <span class="key">Hostname:</span>
+                        <span class="value">${node.listenerData.hostname}</span>
+                    </div>
+                `;
+            }
+            
+            html += `
+                <div class="key-value">
+                    <span class="key">TLS:</span>
+                    <span class="value">${node.listenerData.tls ? 'Yes' : 'No'}</span>
+                </div>
+            `;
+        }
+
+        // Add gateway-specific information for gateways with listeners
+        if (node.type === 'Gateway') {
+            const listenerNodes = this.nodes.filter(n => 
+                n.type === 'Listener' && n.parentId === node.id
+            );
+            if (listenerNodes.length > 0) {
+                html += `
+                    <div class="key-value">
+                        <span class="key">Listeners:</span>
+                        <span class="value">${listenerNodes.length}</span>
+                    </div>
+                `;
+            }
+        }
+
+        html += `
             <div class="key-value">
                 <span class="key">ID:</span>
                 <span class="value">${node.id}</span>

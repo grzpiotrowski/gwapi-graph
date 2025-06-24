@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"gwapi-graph/internal/k8s"
@@ -221,6 +223,55 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		nodeMap[node.ID] = nodeIndex
 		nodeIndex++
 
+		// Add Gateway Listener nodes (hidden by default)
+		for i, listener := range gw.Spec.Listeners {
+			listenerID := fmt.Sprintf("%s-listener-%d", string(gw.UID), i)
+			listenerName := string(listener.Name)
+			if listenerName == "" {
+				listenerName = fmt.Sprintf("listener-%d", i)
+			}
+
+			hostname := ""
+			if listener.Hostname != nil {
+				hostname = string(*listener.Hostname)
+			}
+
+			parentGatewayID := string(gw.UID)
+			listenerNode := types.Node{
+				ID:        listenerID,
+				Name:      listenerName,
+				Type:      "Listener",
+				Namespace: gw.Namespace,
+				Group:     "gateway.networking.k8s.io",
+				Version:   "v1",
+				Kind:      "Listener",
+				ParentID:  &parentGatewayID,
+				Hidden:    false, // Always visible
+				ListenerData: &types.ListenerData{
+					Port:     int32(listener.Port),
+					Protocol: string(listener.Protocol),
+					Hostname: func() *string {
+						if hostname != "" {
+							return &hostname
+						}
+						return nil
+					}(),
+					TLS: listener.TLS != nil,
+				},
+			}
+			graph.Nodes = append(graph.Nodes, listenerNode)
+			nodeMap[listenerNode.ID] = nodeIndex
+			nodeIndex++
+
+			// Link Listener to Gateway
+			link := types.Link{
+				Source: nodeMap[string(gw.UID)],
+				Target: nodeMap[listenerID],
+				Type:   "listener",
+			}
+			graph.Links = append(graph.Links, link)
+		}
+
 		// Link Gateway to GatewayClass
 		if gw.Spec.GatewayClassName != "" {
 			for _, gc := range resources.GatewayClasses {
@@ -284,7 +335,7 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		nodeIndex++
 	}
 
-	// Add DNSRecord nodes and links to Gateways
+	// Add DNSRecord nodes and links to Gateway Listeners
 	for _, dns := range resources.DNSRecords {
 		uid, _, _ := unstructured.NestedString(dns.Object, "metadata", "uid")
 		name, _, _ := unstructured.NestedString(dns.Object, "metadata", "name")
@@ -303,19 +354,53 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		nodeMap[node.ID] = nodeIndex
 		nodeIndex++
 
-		// Link DNSRecord to Gateway based on the gateway label
+		// Link DNSRecord to specific Gateway Listener based on hostname matching
 		if labels, found, _ := unstructured.NestedMap(dns.Object, "metadata", "labels"); found {
 			if gatewayName, exists := labels["gateway.networking.k8s.io/gateway-name"]; exists {
 				gatewayNameStr, ok := gatewayName.(string)
 				if ok {
+					// Get the DNS name from the DNSRecord spec
+					dnsName, _, _ := unstructured.NestedString(dns.Object, "spec", "dnsName")
+					// Remove trailing dot if present for comparison
+					if strings.HasSuffix(dnsName, ".") {
+						dnsName = strings.TrimSuffix(dnsName, ".")
+					}
+
+					// Find the matching Gateway and its listeners
 					for _, gw := range resources.Gateways {
-						if gw.Name == gatewayNameStr {
-							link := types.Link{
-								Source: nodeMap[string(gw.UID)],
-								Target: nodeMap[node.ID],
-								Type:   "dnsRecord",
+						if gw.Name == gatewayNameStr && gw.Namespace == namespace {
+							// Try to match DNSRecord to specific listener by hostname
+							linkedToListener := false
+							for i, listener := range gw.Spec.Listeners {
+								listenerID := fmt.Sprintf("%s-listener-%d", string(gw.UID), i)
+
+								// Check if listener hostname matches the DNS name
+								if listener.Hostname != nil && string(*listener.Hostname) == dnsName {
+									if listenerIndex, exists := nodeMap[listenerID]; exists {
+										link := types.Link{
+											Source: listenerIndex,
+											Target: nodeMap[node.ID],
+											Type:   "dnsRecord",
+										}
+										graph.Links = append(graph.Links, link)
+										linkedToListener = true
+										break
+									}
+								}
 							}
-							graph.Links = append(graph.Links, link)
+
+							// If no specific listener matched, fall back to linking to the Gateway itself
+							// This handles wildcard DNSRecords or cases where hostname matching fails
+							if !linkedToListener {
+								if gatewayIndex, exists := nodeMap[string(gw.UID)]; exists {
+									link := types.Link{
+										Source: gatewayIndex,
+										Target: nodeMap[node.ID],
+										Type:   "dnsRecord",
+									}
+									graph.Links = append(graph.Links, link)
+								}
+							}
 							break
 						}
 					}

@@ -25,13 +25,24 @@ type Graph struct {
 
 // Node represents a node in the graph
 type Node struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Namespace string `json:"namespace"`
-	Group     string `json:"group"`
-	Version   string `json:"version"`
-	Kind      string `json:"kind"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Type         string        `json:"type"`
+	Namespace    string        `json:"namespace"`
+	Group        string        `json:"group"`
+	Version      string        `json:"version"`
+	Kind         string        `json:"kind"`
+	ParentID     *string       `json:"parentId,omitempty"`     // For listener nodes, reference to parent Gateway
+	ListenerData *ListenerData `json:"listenerData,omitempty"` // Additional data for listener nodes
+	Hidden       bool          `json:"hidden,omitempty"`       // Whether node should be hidden by default
+}
+
+// ListenerData contains additional information for Gateway listener nodes
+type ListenerData struct {
+	Port     int32   `json:"port"`
+	Protocol string  `json:"protocol"`
+	Hostname *string `json:"hostname,omitempty"`
+	TLS      bool    `json:"tls"`
 }
 
 // Link represents a connection between nodes
