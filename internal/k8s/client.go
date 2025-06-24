@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -126,4 +127,14 @@ func (c *Client) GetDNSRecords(ctx context.Context) ([]unstructured.Unstructured
 	}
 
 	return result.Items, nil
+}
+
+// GetServices returns all Service resources
+func (c *Client) GetServices(ctx context.Context) ([]corev1.Service, error) {
+	services, err := c.k8sClient.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list Services: %w", err)
+	}
+
+	return services.Items, nil
 }

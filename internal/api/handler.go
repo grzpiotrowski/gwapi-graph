@@ -162,8 +162,20 @@ func (h *Handler) fetchAllResources(ctx context.Context) (*types.ResourceCollect
 		collection.DNSRecords = dnsRecords
 	}
 
+	// Fetch Services
+	services, err := h.k8sClient.GetServices(ctx)
+	if err != nil {
+		log.Printf("Error fetching Services: %v", err)
+	} else {
+		log.Printf("Found %d Services", len(services))
+		for _, svc := range services {
+			log.Printf("  - Service: %s/%s", svc.Namespace, svc.Name)
+		}
+		collection.Services = services
+	}
+
 	log.Printf("Finished fetching resources. Total nodes that will be created: %d",
-		len(collection.GatewayClasses)+len(collection.Gateways)+len(collection.HTTPRoutes)+len(collection.ReferenceGrants)+len(collection.DNSRecords))
+		len(collection.GatewayClasses)+len(collection.Gateways)+len(collection.HTTPRoutes)+len(collection.ReferenceGrants)+len(collection.DNSRecords)+len(collection.Services))
 
 	return collection, nil
 }
@@ -306,6 +318,48 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 							graph.Links = append(graph.Links, link)
 							break
 						}
+					}
+				}
+			}
+		}
+	}
+
+	// Add Service nodes
+	for _, svc := range resources.Services {
+		node := types.Node{
+			ID:        string(svc.UID),
+			Name:      svc.Name,
+			Type:      "Service",
+			Namespace: svc.Namespace,
+			Group:     "",
+			Version:   "v1",
+			Kind:      "Service",
+		}
+		graph.Nodes = append(graph.Nodes, node)
+		nodeMap[node.ID] = nodeIndex
+		nodeIndex++
+	}
+
+	// Link HTTPRoutes to Services via backendRefs
+	for _, route := range resources.HTTPRoutes {
+		for _, rule := range route.Spec.Rules {
+			for _, backendRef := range rule.BackendRefs {
+				// Find matching service
+				for _, svc := range resources.Services {
+					serviceName := string(backendRef.Name)
+					serviceNamespace := route.Namespace // Default to route namespace
+					if backendRef.Namespace != nil {
+						serviceNamespace = string(*backendRef.Namespace)
+					}
+
+					if svc.Name == serviceName && svc.Namespace == serviceNamespace {
+						link := types.Link{
+							Source: nodeMap[string(route.UID)],
+							Target: nodeMap[string(svc.UID)],
+							Type:   "backendRef",
+						}
+						graph.Links = append(graph.Links, link)
+						break
 					}
 				}
 			}

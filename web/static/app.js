@@ -122,14 +122,32 @@ class GatewayGraphVisualizer {
 
     updateGraph(data) {
         console.log('Updating graph with data:', data);
+        
+        // Store the old node positions
+        const oldNodesMap = new Map();
+        this.nodes.forEach(node => {
+            oldNodesMap.set(node.id, { x: node.x, y: node.y, fx: node.fx, fy: node.fy });
+        });
+        
         this.nodes = data.nodes || [];
         this.links = data.links || [];
+        
+        // Preserve positions for existing nodes
+        this.nodes.forEach(node => {
+            const oldPos = oldNodesMap.get(node.id);
+            if (oldPos) {
+                node.x = oldPos.x;
+                node.y = oldPos.y;
+                node.fx = oldPos.fx;
+                node.fy = oldPos.fy;
+            }
+        });
         
         console.log(`Graph update: ${this.nodes.length} nodes, ${this.links.length} links`);
         console.log('Nodes:', this.nodes);
         console.log('Links:', this.links);
 
-        // Update simulation
+        // Update simulation only if needed
         this.updateSimulation();
         
         // Render the graph
@@ -137,12 +155,33 @@ class GatewayGraphVisualizer {
     }
 
     updateSimulation() {
+        const isFirstRun = !this.simulation;
+        
         if (this.simulation) {
-            this.simulation.stop();
+            // Update existing simulation with new data
+            this.simulation.nodes(this.nodes);
+            
+            // Update force link with new links
+            const linkForce = this.simulation.force('link');
+            if (linkForce) {
+                linkForce.links(this.links);
+            }
+            
+            // Only restart if there are new nodes or significant changes
+            if (isFirstRun) {
+                this.simulation.alpha(0.3).restart();
+            } else {
+                // Gentle restart to accommodate new nodes
+                this.simulation.alpha(0.1).restart();
+            }
+        } else {
+            // Create new simulation
+            this.simulation = d3.forceSimulation(this.nodes);
+            this.setupLayoutForces();
         }
+    }
 
-        this.simulation = d3.forceSimulation(this.nodes);
-
+    setupLayoutForces() {
         switch (this.layout) {
             case 'force':
                 this.setupForceLayout();
@@ -175,11 +214,12 @@ class GatewayGraphVisualizer {
             .force('charge', d3.forceManyBody().strength(-200))
             .force('center', d3.forceCenter(centerX, centerY))
             .force('radial', d3.forceRadial(d => {
-                            if (d.type === 'GatewayClass') return 0;
-            if (d.type === 'Gateway') return 100;
-            if (d.type === 'HTTPRoute') return 200;
-            if (d.type === 'DNSRecord') return 300;
-            return 350;
+                if (d.type === 'GatewayClass') return 0;
+                if (d.type === 'Gateway') return 100;
+                if (d.type === 'HTTPRoute') return 200;
+                if (d.type === 'DNSRecord') return 300;
+                if (d.type === 'Service') return 400;
+                return 350;
             }, centerX, centerY))
             .force('collision', d3.forceCollide().radius(25));
     }
@@ -212,6 +252,9 @@ class GatewayGraphVisualizer {
                 case 'DNSRecord':
                     node.hierarchyLevel = 1.5; // Between Gateway and HTTPRoute
                     break;
+                case 'Service':
+                    node.hierarchyLevel = 3; // After HTTPRoute
+                    break;
                 case 'ReferenceGrant':
                     node.hierarchyLevel = 3;
                     break;
@@ -228,62 +271,130 @@ class GatewayGraphVisualizer {
         
         const g = this.svg.select('.graph-group');
 
-        // Clear existing elements
-        g.selectAll('*').remove();
+        // Use D3 data join pattern for smooth updates
+        this.renderLinks(g);
+        this.renderNodes(g);
 
-        // Render links
-        const link = g.append('g')
+        // Update positions on simulation tick
+        this.simulation.on('tick', () => {
+            g.selectAll('.link')
+                .attr('x1', d => d.source.x)
+                .attr('y1', d => d.source.y)
+                .attr('x2', d => d.target.x)
+                .attr('y2', d => d.target.y);
+
+            g.selectAll('.node-group')
+                .attr('transform', d => `translate(${d.x},${d.y})`);
+        });
+    }
+
+    renderLinks(g) {
+        // Bind data to links
+        const linkSelection = g.selectAll('.links')
+            .data([0]); // Dummy data to ensure container exists
+
+        const linksContainer = linkSelection.enter()
+            .append('g')
             .attr('class', 'links')
-            .selectAll('line')
-            .data(this.links)
-            .enter().append('line')
+            .merge(linkSelection);
+
+        // Bind actual link data
+        const links = linksContainer.selectAll('.link')
+            .data(this.links, d => `${d.source.id || d.source}-${d.target.id || d.target}-${d.type}`);
+
+        // Remove old links
+        links.exit()
+            .transition()
+            .duration(300)
+            .style('opacity', 0)
+            .remove();
+
+        // Add new links
+        const newLinks = links.enter()
+            .append('line')
             .attr('class', d => `link ${d.type}`)
+            .style('opacity', 0)
             .on('mouseover', (event, d) => this.showTooltip(event, `${d.type} connection`))
             .on('mouseout', () => this.hideTooltip());
 
-        // Render nodes
-        const node = g.append('g')
+        // Update all links
+        newLinks.merge(links)
+            .transition()
+            .duration(300)
+            .style('opacity', 1);
+    }
+
+    renderNodes(g) {
+        // Bind data to nodes
+        const nodeSelection = g.selectAll('.nodes')
+            .data([0]); // Dummy data to ensure container exists
+
+        const nodesContainer = nodeSelection.enter()
+            .append('g')
             .attr('class', 'nodes')
-            .selectAll('g')
-            .data(this.nodes)
-            .enter().append('g')
+            .merge(nodeSelection);
+
+        // Bind actual node data
+        const nodes = nodesContainer.selectAll('.node-group')
+            .data(this.nodes, d => d.id);
+
+        // Remove old nodes
+        const exitingNodes = nodes.exit();
+        exitingNodes
+            .transition()
+            .duration(300)
+            .style('opacity', 0)
+            .remove();
+
+        // Add new nodes
+        const newNodes = nodes.enter()
+            .append('g')
             .attr('class', 'node-group')
+            .style('opacity', 0)
             .call(d3.drag()
                 .on('start', (event, d) => this.dragstarted(event, d))
                 .on('drag', (event, d) => this.dragged(event, d))
                 .on('end', (event, d) => this.dragended(event, d)));
 
-        // Add circles for nodes
-        node.append('circle')
+        // Add circles for new nodes
+        newNodes.append('circle')
             .attr('r', d => this.getNodeRadius(d))
             .attr('class', d => `node ${d.type.toLowerCase()}`)
             .on('click', (event, d) => this.selectNode(d))
             .on('mouseover', (event, d) => this.showTooltip(event, this.getNodeTooltip(d)))
             .on('mouseout', () => this.hideTooltip());
 
-        // Add labels
-        node.append('text')
+        // Add labels for new nodes
+        newNodes.append('text')
             .attr('class', 'node-label')
             .attr('dy', d => this.getNodeRadius(d) + 15)
             .text(d => d.name);
 
-        // Add namespace labels
-        node.append('text')
+        // Add namespace labels for new nodes
+        newNodes.append('text')
             .attr('class', 'namespace-label')
             .attr('dy', d => this.getNodeRadius(d) + 28)
             .text(d => d.namespace ? `(${d.namespace})` : '');
 
-        // Update positions on simulation tick
-        this.simulation.on('tick', () => {
-            link
-                .attr('x1', d => d.source.x)
-                .attr('y1', d => d.source.y)
-                .attr('x2', d => d.target.x)
-                .attr('y2', d => d.target.y);
+        // Update all nodes (new and existing)
+        const allNodes = newNodes.merge(nodes);
+        
+        allNodes.transition()
+            .duration(300)
+            .style('opacity', 1);
 
-            node
-                .attr('transform', d => `translate(${d.x},${d.y})`);
-        });
+        // Update existing node properties that might have changed
+        allNodes.select('circle')
+            .attr('r', d => this.getNodeRadius(d))
+            .attr('class', d => `node ${d.type.toLowerCase()}`);
+
+        allNodes.select('.node-label')
+            .attr('dy', d => this.getNodeRadius(d) + 15)
+            .text(d => d.name);
+
+        allNodes.select('.namespace-label')
+            .attr('dy', d => this.getNodeRadius(d) + 28)
+            .text(d => d.namespace ? `(${d.namespace})` : '');
     }
 
     getNodeRadius(d) {
@@ -293,6 +404,7 @@ class GatewayGraphVisualizer {
             'Gateway': 1.3,
             'HTTPRoute': 1.0,
             'DNSRecord': 0.9,
+            'Service': 1.1,
             'ReferenceGrant': 0.8
         };
         return baseRadius * (typeMultipliers[d.type] || 1.0);
@@ -411,8 +523,12 @@ class GatewayGraphVisualizer {
     }
 
     updateLayout() {
-        this.updateSimulation();
-        this.simulation.alpha(0.3).restart();
+        // Update the simulation forces for the new layout
+        if (this.simulation) {
+            this.setupLayoutForces();
+            // Give it a moderate restart to transition to new layout
+            this.simulation.alpha(0.5).restart();
+        }
     }
 }
 
