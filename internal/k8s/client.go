@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -19,6 +22,7 @@ import (
 type Client struct {
 	k8sClient     kubernetes.Interface
 	gatewayClient gatewayclient.Interface
+	dynamicClient dynamic.Interface
 }
 
 // NewClient creates a new Kubernetes client
@@ -38,9 +42,15 @@ func NewClient() (*Client, error) {
 		return nil, fmt.Errorf("failed to create Gateway API client: %w", err)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
 	return &Client{
 		k8sClient:     k8sClient,
 		gatewayClient: gatewayClient,
+		dynamicClient: dynamicClient,
 	}, nil
 }
 
@@ -100,4 +110,20 @@ func (c *Client) GetReferenceGrants(ctx context.Context) ([]gatewayv1beta1.Refer
 		return nil, fmt.Errorf("failed to list reference grants: %w", err)
 	}
 	return grants.Items, nil
+}
+
+// GetDNSRecords returns all DNSRecord resources
+func (c *Client) GetDNSRecords(ctx context.Context) ([]unstructured.Unstructured, error) {
+	gvr := schema.GroupVersionResource{
+		Group:    "ingress.operator.openshift.io",
+		Version:  "v1",
+		Resource: "dnsrecords",
+	}
+
+	result, err := c.dynamicClient.Resource(gvr).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list DNSRecords: %w", err)
+	}
+
+	return result.Items, nil
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 var upgrader = websocket.Upgrader{
@@ -147,8 +148,22 @@ func (h *Handler) fetchAllResources(ctx context.Context) (*types.ResourceCollect
 		collection.ReferenceGrants = referenceGrants
 	}
 
+	// Fetch DNSRecords
+	dnsRecords, err := h.k8sClient.GetDNSRecords(ctx)
+	if err != nil {
+		log.Printf("Error fetching DNSRecords: %v", err)
+	} else {
+		log.Printf("Found %d DNSRecords", len(dnsRecords))
+		for _, dns := range dnsRecords {
+			name, _, _ := unstructured.NestedString(dns.Object, "metadata", "name")
+			namespace, _, _ := unstructured.NestedString(dns.Object, "metadata", "namespace")
+			log.Printf("  - DNSRecord: %s/%s", namespace, name)
+		}
+		collection.DNSRecords = dnsRecords
+	}
+
 	log.Printf("Finished fetching resources. Total nodes that will be created: %d",
-		len(collection.GatewayClasses)+len(collection.Gateways)+len(collection.HTTPRoutes)+len(collection.ReferenceGrants))
+		len(collection.GatewayClasses)+len(collection.Gateways)+len(collection.HTTPRoutes)+len(collection.ReferenceGrants)+len(collection.DNSRecords))
 
 	return collection, nil
 }
@@ -255,6 +270,46 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		graph.Nodes = append(graph.Nodes, node)
 		nodeMap[node.ID] = nodeIndex
 		nodeIndex++
+	}
+
+	// Add DNSRecord nodes and links to Gateways
+	for _, dns := range resources.DNSRecords {
+		uid, _, _ := unstructured.NestedString(dns.Object, "metadata", "uid")
+		name, _, _ := unstructured.NestedString(dns.Object, "metadata", "name")
+		namespace, _, _ := unstructured.NestedString(dns.Object, "metadata", "namespace")
+
+		node := types.Node{
+			ID:        uid,
+			Name:      name,
+			Type:      "DNSRecord",
+			Namespace: namespace,
+			Group:     "ingress.operator.openshift.io",
+			Version:   "v1",
+			Kind:      "DNSRecord",
+		}
+		graph.Nodes = append(graph.Nodes, node)
+		nodeMap[node.ID] = nodeIndex
+		nodeIndex++
+
+		// Link DNSRecord to Gateway based on the gateway label
+		if labels, found, _ := unstructured.NestedMap(dns.Object, "metadata", "labels"); found {
+			if gatewayName, exists := labels["gateway.networking.k8s.io/gateway-name"]; exists {
+				gatewayNameStr, ok := gatewayName.(string)
+				if ok {
+					for _, gw := range resources.Gateways {
+						if gw.Name == gatewayNameStr {
+							link := types.Link{
+								Source: nodeMap[string(gw.UID)],
+								Target: nodeMap[node.ID],
+								Type:   "dnsRecord",
+							}
+							graph.Links = append(graph.Links, link)
+							break
+						}
+					}
+				}
+			}
+		}
 	}
 
 	return graph

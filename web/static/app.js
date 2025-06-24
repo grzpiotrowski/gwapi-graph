@@ -175,10 +175,11 @@ class GatewayGraphVisualizer {
             .force('charge', d3.forceManyBody().strength(-200))
             .force('center', d3.forceCenter(centerX, centerY))
             .force('radial', d3.forceRadial(d => {
-                if (d.type === 'GatewayClass') return 0;
-                if (d.type === 'Gateway') return 100;
-                if (d.type === 'HTTPRoute') return 200;
-                return 250;
+                            if (d.type === 'GatewayClass') return 0;
+            if (d.type === 'Gateway') return 100;
+            if (d.type === 'HTTPRoute') return 200;
+            if (d.type === 'DNSRecord') return 300;
+            return 350;
             }, centerX, centerY))
             .force('collision', d3.forceCollide().radius(25));
     }
@@ -207,6 +208,9 @@ class GatewayGraphVisualizer {
                     break;
                 case 'HTTPRoute':
                     node.hierarchyLevel = 2;
+                    break;
+                case 'DNSRecord':
+                    node.hierarchyLevel = 1.5; // Between Gateway and HTTPRoute
                     break;
                 case 'ReferenceGrant':
                     node.hierarchyLevel = 3;
@@ -288,6 +292,7 @@ class GatewayGraphVisualizer {
             'GatewayClass': 1.5,
             'Gateway': 1.3,
             'HTTPRoute': 1.0,
+            'DNSRecord': 0.9,
             'ReferenceGrant': 0.8
         };
         return baseRadius * (typeMultipliers[d.type] || 1.0);

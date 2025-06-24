@@ -95,6 +95,7 @@ header h1 {
 .legend-color.gateway { background: #3498db; }
 .legend-color.httproute { background: #2ecc71; }
 .legend-color.referencegrant { background: #9b59b6; }
+.legend-color.dnsrecord { background: #f59e0b; }
 
 #graph-container {
     grid-area: graph;
@@ -177,6 +178,7 @@ header h1 {
 .node.gateway { fill: #3498db; }
 .node.httproute { fill: #2ecc71; }
 .node.referencegrant { fill: #9b59b6; }
+.node.dnsrecord { fill: #f59e0b; }
 
 .node:hover {
     stroke-width: 3px;

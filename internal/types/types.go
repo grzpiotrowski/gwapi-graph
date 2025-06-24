@@ -1,16 +1,18 @@
 package types
 
 import (
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
-// ResourceCollection holds all Gateway API Standard channel resources for v1.2.1
+// ResourceCollection holds all Gateway API Standard channel resources for v1.2.1 plus DNSRecord
 type ResourceCollection struct {
 	GatewayClasses  []gatewayv1.GatewayClass        `json:"gatewayClasses"`
 	Gateways        []gatewayv1.Gateway             `json:"gateways"`
 	HTTPRoutes      []gatewayv1.HTTPRoute           `json:"httpRoutes"`
 	ReferenceGrants []gatewayv1beta1.ReferenceGrant `json:"referenceGrants"`
+	DNSRecords      []unstructured.Unstructured     `json:"dnsRecords"`
 }
 
 // Graph represents the graph structure for D3.js

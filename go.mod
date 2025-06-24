@@ -12,6 +12,8 @@ require (
 	sigs.k8s.io/gateway-api v1.2.1
 )
 
+replace github.com/openshift/cluster-ingress-operator => github.com/openshift/cluster-ingress-operator v0.0.0-20240301000000-000000000000
+
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect
 	github.com/chenzhuoyu/base64x v0.0.0-20221115062448-fe3a3abad311 // indirect
