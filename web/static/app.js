@@ -7,12 +7,14 @@ class GatewayGraphVisualizer {
         this.simulation = null;
         this.nodes = [];
         this.links = [];
+        this.dnsZones = [];
         this.selectedNode = null;
         this.autoRefresh = false;
         this.refreshInterval = null;
         this.websocket = null;
         this.zoom = null;
         this.layout = 'force';
+        this.showDNSZones = true;
         
         this.init();
         console.log('GatewayGraphVisualizer initialized');
@@ -43,6 +45,14 @@ class GatewayGraphVisualizer {
             });
 
         this.svg.call(this.zoom);
+
+        // Add click handler to clear selections when clicking on empty space
+        this.svg.on('click', (event) => {
+            // Only clear selection if clicking directly on the SVG (not on any child elements)
+            if (event.target === event.currentTarget) {
+                this.clearSelection();
+            }
+        });
 
         // Create main group for graph elements
         this.svg.append('g')
@@ -80,6 +90,11 @@ class GatewayGraphVisualizer {
         document.getElementById('layout-select').addEventListener('change', (e) => {
             this.layout = e.target.value;
             this.updateLayout();
+        });
+
+        // DNS zones toggle
+        document.getElementById('dns-zones-toggle-btn').addEventListener('click', () => {
+            this.toggleDNSZones();
         });
     }
 
@@ -131,6 +146,7 @@ class GatewayGraphVisualizer {
         
         this.nodes = data.nodes || [];
         this.links = data.links || [];
+        this.dnsZones = data.dnsZones || [];
         
         // Preserve positions for existing nodes
         this.nodes.forEach(node => {
@@ -143,9 +159,10 @@ class GatewayGraphVisualizer {
             }
         });
         
-        console.log(`Graph update: ${this.nodes.length} nodes, ${this.links.length} links`);
+        console.log(`Graph update: ${this.nodes.length} nodes, ${this.links.length} links, ${this.dnsZones.length} DNS zones`);
         console.log('Nodes:', this.nodes);
         console.log('Links:', this.links);
+        console.log('DNS Zones:', this.dnsZones);
 
         // Update simulation only if needed
         this.updateSimulation();
@@ -270,16 +287,27 @@ class GatewayGraphVisualizer {
     render() {
         console.log('Starting render process...');
         console.log(`SVG dimensions: ${this.width}x${this.height}`);
-        console.log(`Rendering ${this.nodes.length} nodes and ${this.links.length} links`);
+        console.log(`Rendering ${this.dnsZones.length} DNS zones, ${this.nodes.length} nodes and ${this.links.length} links`);
         
         const g = this.svg.select('.graph-group');
 
         // Use D3 data join pattern for smooth updates
+        if (this.showDNSZones) {
+            this.renderDNSZones(g);
+        } else {
+            // Remove DNS zones when disabled
+            g.selectAll('.dns-zones').remove();
+        }
         this.renderLinks(g);
         this.renderNodes(g);
 
         // Update positions on simulation tick
         this.simulation.on('tick', () => {
+            // Update DNS zone hulls only if enabled
+            if (this.showDNSZones) {
+                this.updateDNSZones(g);
+            }
+            
             g.selectAll('.link')
                 .attr('x1', d => d.source.x)
                 .attr('y1', d => d.source.y)
@@ -424,6 +452,233 @@ class GatewayGraphVisualizer {
         return `${d.type}: ${d.name}${d.namespace ? ` (${d.namespace})` : ''}`;
     }
 
+    renderDNSZones(g) {
+        // Filter out zones with no visible nodes and sort by hierarchy
+        const visibleZones = this.dnsZones.filter(zone => {
+            const zoneNodes = zone.nodes.map(nodeId => 
+                this.nodes.find(n => n.id === nodeId)
+            ).filter(Boolean);
+            
+            console.log(`Zone ${zone.name}: found ${zoneNodes.length} nodes out of ${zone.nodes.length} total`);
+            
+            const visibleNodes = zoneNodes.filter(n => {
+                // For now, just check if node exists and isn't explicitly hidden
+                // DOM elements might not be rendered yet when this is called
+                const isVisible = n && !n.hidden;
+                if (!isVisible) {
+                    console.log(`Node ${n.id} (${n.name}) is not visible: exists=${!!n}, hidden=${n ? n.hidden : 'N/A'}`);
+                }
+                return isVisible;
+            });
+            
+            console.log(`Zone ${zone.name}: ${visibleNodes.length} visible nodes out of ${zoneNodes.length}`);
+            return visibleNodes.length > 0;
+        });
+        
+        console.log(`Rendering ${this.dnsZones.length} total DNS zones, ${visibleZones.length} visible:`, visibleZones.map(z => z.name));
+        
+        // Sort zones by hierarchy (broader zones first, so they render behind more specific zones)
+        const sortedZones = visibleZones.sort((a, b) => {
+            const aDepth = a.name.split('.').length;
+            const bDepth = b.name.split('.').length;
+            return aDepth - bDepth; // Broader zones (fewer dots) first
+        });
+        
+        // Create DNS zones container
+        const zonesSelection = g.selectAll('.dns-zones')
+            .data([0]); // Dummy data to ensure container exists
+
+        const zonesContainer = zonesSelection.enter()
+            .append('g')
+            .attr('class', 'dns-zones')
+            .merge(zonesSelection);
+
+        // Bind DNS zone data (sorted by hierarchy)
+        const zones = zonesContainer.selectAll('.dns-zone')
+            .data(sortedZones, d => d.name);
+
+        // Remove old zones
+        zones.exit()
+            .transition()
+            .duration(300)
+            .style('opacity', 0)
+            .remove();
+
+        // Add new zones
+        const newZones = zones.enter()
+            .append('g')
+            .attr('class', 'dns-zone')
+            .style('opacity', 0);
+
+        // Add zone hull path with hierarchy-aware styling
+        newZones.append('path')
+            .attr('class', 'zone-hull')
+            .attr('fill', d => {
+                console.log(`Setting zone ${d.name} color to ${d.color}`);
+                return d.color;
+            })
+            .attr('stroke', d => d3.color(d.color).darker(0.5))
+            .attr('stroke-width', d => {
+                // Broader zones get thicker strokes
+                const depth = d.name.split('.').length;
+                return Math.max(1, 5 - depth);
+            })
+            .attr('stroke-dasharray', d => {
+                // More specific zones get dashed lines
+                const depth = d.name.split('.').length;
+                return depth > 4 ? '5,5' : 'none';
+            })
+            .style('fill-opacity', d => {
+                // Broader zones get lower opacity so inner zones are more visible
+                const depth = d.name.split('.').length;
+                return Math.max(0.1, 0.35 - (depth * 0.03));
+            })
+            .style('stroke-opacity', 0.8)
+            .style('cursor', 'pointer')
+            .on('click', (event, d) => {
+                event.stopPropagation();
+                this.selectDNSZone(d);
+            });
+
+        // Add zone label
+        newZones.append('text')
+            .attr('class', 'zone-label')
+            .attr('text-anchor', 'middle')
+            .attr('font-weight', 'bold')
+            .attr('font-size', d => {
+                // Broader zones get larger text
+                const depth = d.name.split('.').length;
+                return Math.max(12, 20 - depth) + 'px';
+            })
+            .attr('fill', d => d3.color(d.color).darker(2))
+            .style('cursor', 'pointer')
+            .text(d => {
+                console.log(`Adding label for zone: ${d.name}`);
+                return d.name;
+            })
+            .on('click', (event, d) => {
+                event.stopPropagation();
+                this.selectDNSZone(d);
+            });
+
+        // Update all zones
+        const allZones = newZones.merge(zones);
+        allZones.transition()
+            .duration(300)
+            .style('opacity', 1);
+            
+        console.log(`DNS zones rendered: ${allZones.size()} elements`);
+    }
+
+    updateDNSZones(g) {
+        // Update DNS zone hulls based on current node positions
+        g.selectAll('.dns-zone').each((zoneData, i, nodes) => {
+            const zoneElement = d3.select(nodes[i]);
+            
+            // Get nodes belonging to this zone
+            const zoneNodes = this.nodes.filter(node => 
+                zoneData.nodes.includes(node.id) && 
+                node.x !== undefined && 
+                node.y !== undefined &&
+                !node.hidden
+            );
+
+            console.log(`Zone ${zoneData.name}: found ${zoneNodes.length} visible nodes out of ${zoneData.nodes.length} total nodes`);
+
+            if (zoneNodes.length < 1) {
+                // Hide zones with no visible nodes
+                zoneElement.style('opacity', 0);
+                return;
+            }
+
+            zoneElement.style('opacity', 1);
+
+            // Calculate hull points
+            const points = zoneNodes.map(node => [node.x, node.y]);
+            
+            if (zoneNodes.length === 1) {
+                // For single nodes, create a circle around the node
+                const [x, y] = points[0];
+                // Broader zones get larger radius
+                const depth = zoneData.name.split('.').length;
+                const radius = Math.max(30, 70 - (depth * 8));
+                const circlePoints = [];
+                for (let angle = 0; angle < 2 * Math.PI; angle += Math.PI / 6) {
+                    circlePoints.push([
+                        x + Math.cos(angle) * radius,
+                        y + Math.sin(angle) * radius
+                    ]);
+                }
+
+                // Create smooth circle path
+                const line = d3.line()
+                    .x(d => d[0])
+                    .y(d => d[1])
+                    .curve(d3.curveCatmullRomClosed.alpha(0.5));
+
+                // Update hull path
+                zoneElement.select('.zone-hull')
+                    .attr('d', line(circlePoints));
+
+                // Update label position (center of circle)
+                zoneElement.select('.zone-label')
+                    .attr('x', x)
+                    .attr('y', y - 50); // Above the circle
+                
+                // Update traffic flow labels position
+                zoneElement.selectAll('.traffic-flow-label')
+                    .attr('x', x)
+                    .attr('y', y - 50);
+
+            } else {
+                // Multiple nodes - use hull calculation
+                
+                // Add padding around nodes for better visual grouping
+                // Broader zones get more padding for better visual hierarchy
+                const depth = zoneData.name.split('.').length;
+                const padding = Math.max(20, 60 - (depth * 8));
+                const expandedPoints = [];
+                
+                points.forEach(point => {
+                    const [x, y] = point;
+                    // Add multiple points around each node for better hull calculation
+                    for (let angle = 0; angle < 2 * Math.PI; angle += Math.PI / 3) {
+                        expandedPoints.push([
+                            x + Math.cos(angle) * padding,
+                            y + Math.sin(angle) * padding
+                        ]);
+                    }
+                });
+
+                // Calculate convex hull
+                const hull = d3.polygonHull(expandedPoints);
+                
+                if (hull && hull.length >= 3) {
+                    // Create smooth path
+                    const line = d3.line()
+                        .x(d => d[0])
+                        .y(d => d[1])
+                        .curve(d3.curveCatmullRomClosed.alpha(0.5));
+
+                    // Update hull path
+                    zoneElement.select('.zone-hull')
+                        .attr('d', line(hull));
+
+                    // Update label position (center of hull)
+                    const centroid = d3.polygonCentroid(hull);
+                    zoneElement.select('.zone-label')
+                        .attr('x', centroid[0])
+                        .attr('y', centroid[1]);
+                    
+                    // Update traffic flow labels position
+                    zoneElement.selectAll('.traffic-flow-label')
+                        .attr('x', centroid[0])
+                        .attr('y', centroid[1]);
+                }
+            }
+        });
+    }
+
     handleNodeClick(event, node) {
         // Standard node selection (removed gateway listener toggling)
         this.selectNode(node);
@@ -455,6 +710,7 @@ class GatewayGraphVisualizer {
     selectNode(node) {
         // Remove previous selection
         this.svg.selectAll('.node').classed('selected', false);
+        this.svg.selectAll('.dns-zone').classed('selected', false);
         
         // Select current node
         this.svg.selectAll('.node')
@@ -462,7 +718,36 @@ class GatewayGraphVisualizer {
             .classed('selected', true);
 
         this.selectedNode = node;
+        this.selectedDNSZone = null;
         this.updateInfoPanel(node);
+    }
+
+    selectDNSZone(zone) {
+        // Remove previous selection
+        this.svg.selectAll('.node').classed('selected', false);
+        this.svg.selectAll('.dns-zone').classed('selected', false);
+        
+        // Select current zone
+        this.svg.selectAll('.dns-zone')
+            .filter(d => d.name === zone.name)
+            .classed('selected', true);
+
+        this.selectedNode = null;
+        this.selectedDNSZone = zone;
+        this.updateInfoPanelForZone(zone);
+    }
+
+    clearSelection() {
+        // Remove all selections
+        this.svg.selectAll('.node').classed('selected', false);
+        this.svg.selectAll('.dns-zone').classed('selected', false);
+        
+        this.selectedNode = null;
+        this.selectedDNSZone = null;
+        
+        // Reset info panel
+        const infoContent = document.getElementById('info-content');
+        infoContent.innerHTML = '<p>Click on a node or DNS zone to see details</p>';
     }
 
     updateInfoPanel(node) {
@@ -483,6 +768,92 @@ class GatewayGraphVisualizer {
         
         // Load detailed resource information
         this.loadResourceDetails(node);
+    }
+
+    updateInfoPanelForZone(zone) {
+        const infoContent = document.getElementById('info-content');
+        
+        // Get nodes belonging to this zone
+        const zoneNodes = this.nodes.filter(node => 
+            zone.nodes.includes(node.id)
+        );
+
+        // Group nodes by type
+        const nodesByType = zoneNodes.reduce((acc, node) => {
+            if (!acc[node.type]) {
+                acc[node.type] = [];
+            }
+            acc[node.type].push(node);
+            return acc;
+        }, {});
+
+        let html = `
+            <h4>🌐 DNS Zone</h4>
+            <div class="resource-metadata">
+                <span class="label">Zone Name:</span>
+                <span class="value">${zone.name}</span>
+                <span class="label">Total Resources:</span>
+                <span class="value">${zoneNodes.length}</span>
+            </div>
+        `;
+
+        // Add zone description
+        html += `
+            <div class="resource-section">
+                <h5>Zone Information</h5>
+                <div class="resource-section-content">
+                    <div style="padding: 0.5rem; background: #f8f9fa; border-radius: 4px; margin-bottom: 1rem;">
+                        <div style="font-size: 0.9rem; color: #495057;">
+                            This DNS zone groups resources that handle traffic for the <strong>${zone.name}</strong> domain.
+                            Resources in this zone are visually grouped together with a colored boundary.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Show resources by type
+        Object.keys(nodesByType).sort().forEach(type => {
+            const nodes = nodesByType[type];
+            html += `
+                <div class="resource-section">
+                    <h5>${type} Resources (${nodes.length})</h5>
+                    <div class="resource-section-content">
+                        ${nodes.map(node => `
+                            <div style="margin-bottom: 0.5rem; padding: 0.5rem; background: #f8f9fa; border-radius: 4px; cursor: pointer;" 
+                                 onclick="visualizer.selectNode(visualizer.nodes.find(n => n.id === '${node.id}'))">
+                                <strong>${node.name}</strong>
+                                ${node.namespace ? ` (${node.namespace})` : ' (cluster-scoped)'}
+                                <div style="font-size: 0.85rem; color: #6c757d;">
+                                    ${node.hostname ? `Hostname: ${node.hostname}` : ''}
+                                    ${node.listenerData ? `Port: ${node.listenerData.port} (${node.listenerData.protocol})` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            `;
+        });
+
+        // Add zone hierarchy information
+        const depth = zone.name.split('.').length;
+        if (depth > 2) {
+            html += `
+                <div class="resource-section">
+                    <h5>Zone Hierarchy</h5>
+                    <div class="resource-section-content">
+                        <div style="padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                            <div style="font-size: 0.9rem; color: #495057;">
+                                This zone is <strong>level ${depth}</strong> in the DNS hierarchy.
+                                ${depth > 4 ? 'More specific zones are rendered with dashed borders.' : 'Broader zones are rendered behind more specific ones.'}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        infoContent.innerHTML = html;
     }
 
     showBasicNodeInfo(node) {
@@ -541,6 +912,102 @@ class GatewayGraphVisualizer {
                                 <div style="margin-bottom: 0.5rem;">
                                     <strong>Port ${listener.listenerData.port}</strong> (${listener.listenerData.protocol})
                                     ${listener.listenerData.hostname ? ` - ${listener.listenerData.hostname}` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // Add HTTPRoute-specific information showing related resources
+        if (node.type === 'HTTPRoute') {
+            // Find related DNSRecords (in the same DNS zone)
+            const relatedDNSRecords = this.nodes
+                .filter(n => n.type === 'DNSRecord' && node.dnsZone && n.dnsZone === node.dnsZone);
+
+            // Find related Services (linked by backendRef)
+            const relatedServices = this.links
+                .filter(link => link.type === 'backendRef' && this.nodes[link.source]?.id === node.id)
+                .map(link => this.nodes[link.target])
+                .filter(n => n && n.type === 'Service');
+
+            if (node.dnsZone) {
+                html += `
+                    <div class="resource-section">
+                        <h5>🌐 DNS Zone</h5>
+                        <div class="resource-section-content">
+                            <div style="padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                                <strong>${node.dnsZone}</strong>
+                                <div style="font-size: 0.85rem; color: #6c757d;">This route belongs to the DNS zone shown as a colored area</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (relatedDNSRecords.length > 0) {
+                html += `
+                    <div class="resource-section">
+                        <h5>🌐 Related DNS Records (${relatedDNSRecords.length})</h5>
+                        <div class="resource-section-content">
+                            ${relatedDNSRecords.map(dns => `
+                                <div style="margin-bottom: 0.5rem; padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                                    <strong>${dns.name}</strong> (${dns.namespace || 'cluster-scoped'})
+                                    <div style="font-size: 0.85rem; color: #6c757d;">DNS record in the same zone</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (relatedServices.length > 0) {
+                html += `
+                    <div class="resource-section">
+                        <h5>🎯 Backend Services (${relatedServices.length})</h5>
+                        <div class="resource-section-content">
+                            ${relatedServices.map(service => `
+                                <div style="margin-bottom: 0.5rem; padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                                    <strong>${service.name}</strong> (${service.namespace || 'cluster-scoped'})
+                                    <div style="font-size: 0.85rem; color: #6c757d;">Traffic is routed to this service</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        // Add DNSRecord-specific information showing traffic flow
+        if (node.type === 'DNSRecord') {
+            // Find related HTTPRoutes (in the same DNS zone)
+            const relatedHTTPRoutes = this.nodes
+                .filter(n => n.type === 'HTTPRoute' && node.dnsZone && n.dnsZone === node.dnsZone);
+
+            if (node.dnsZone) {
+                html += `
+                    <div class="resource-section">
+                        <h5>🌐 DNS Zone</h5>
+                        <div class="resource-section-content">
+                            <div style="padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                                <strong>${node.dnsZone}</strong>
+                                <div style="font-size: 0.85rem; color: #6c757d;">This DNS record belongs to the zone shown as a colored area</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            if (relatedHTTPRoutes.length > 0) {
+                html += `
+                    <div class="resource-section">
+                        <h5>🔗 Related HTTP Routes (${relatedHTTPRoutes.length})</h5>
+                        <div class="resource-section-content">
+                            ${relatedHTTPRoutes.map(route => `
+                                <div style="margin-bottom: 0.5rem; padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                                    <strong>${route.name}</strong> (${route.namespace || 'cluster-scoped'})
+                                    <div style="font-size: 0.85rem; color: #6c757d;">Route in the same DNS zone</div>
                                 </div>
                             `).join('')}
                         </div>
@@ -881,8 +1348,6 @@ class GatewayGraphVisualizer {
         }
     }
 
-
-
     createEditableResource(resource) {
         // Create a clean resource for editing, similar to what 'oc edit' shows
         // Remove read-only fields and system-generated metadata
@@ -1046,10 +1511,23 @@ class GatewayGraphVisualizer {
             this.simulation.alpha(0.5).restart();
         }
     }
+
+    toggleDNSZones() {
+        this.showDNSZones = !this.showDNSZones;
+        
+        // Update button text
+        const button = document.getElementById('dns-zones-toggle-btn');
+        button.textContent = `DNS Zones: ${this.showDNSZones ? 'ON' : 'OFF'}`;
+        
+        // Re-render the graph
+        this.render();
+    }
 }
 
 // Initialize the application when the DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM loaded, initializing Gateway Graph Visualizer...');
     window.gatewayGraph = new GatewayGraphVisualizer();
+    // Also create a global reference for onclick handlers
+    window.visualizer = window.gatewayGraph;
 }); 

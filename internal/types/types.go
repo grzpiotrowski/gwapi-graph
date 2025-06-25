@@ -19,8 +19,16 @@ type ResourceCollection struct {
 
 // Graph represents the graph structure for D3.js
 type Graph struct {
-	Nodes []Node `json:"nodes"`
-	Links []Link `json:"links"`
+	Nodes    []Node    `json:"nodes"`
+	Links    []Link    `json:"links"`
+	DNSZones []DNSZone `json:"dnsZones"`
+}
+
+// DNSZone represents a DNS zone grouping
+type DNSZone struct {
+	Name  string   `json:"name"`
+	Nodes []string `json:"nodes"` // Node IDs that belong to this zone
+	Color string   `json:"color"`
 }
 
 // Node represents a node in the graph
@@ -35,6 +43,8 @@ type Node struct {
 	ParentID     *string       `json:"parentId,omitempty"`     // For listener nodes, reference to parent Gateway
 	ListenerData *ListenerData `json:"listenerData,omitempty"` // Additional data for listener nodes
 	Hidden       bool          `json:"hidden,omitempty"`       // Whether node should be hidden by default
+	DNSZone      string        `json:"dnsZone,omitempty"`      // DNS zone this resource belongs to
+	Hostname     string        `json:"hostname,omitempty"`     // Hostname for DNSRecord and other hostname-based resources
 }
 
 // ListenerData contains additional information for Gateway listener nodes

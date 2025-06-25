@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -185,8 +186,9 @@ func (h *Handler) fetchAllResources(ctx context.Context) (*types.ResourceCollect
 // buildGraph creates a graph data structure from the resources
 func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 	graph := &types.Graph{
-		Nodes: []types.Node{},
-		Links: []types.Link{},
+		Nodes:    []types.Node{},
+		Links:    []types.Link{},
+		DNSZones: []types.DNSZone{},
 	}
 
 	nodeMap := make(map[string]int)
@@ -341,6 +343,13 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		name, _, _ := unstructured.NestedString(dns.Object, "metadata", "name")
 		namespace, _, _ := unstructured.NestedString(dns.Object, "metadata", "namespace")
 
+		// Get the DNS name from the DNSRecord spec
+		dnsName, _, _ := unstructured.NestedString(dns.Object, "spec", "dnsName")
+		// Remove trailing dot if present
+		if strings.HasSuffix(dnsName, ".") {
+			dnsName = strings.TrimSuffix(dnsName, ".")
+		}
+
 		node := types.Node{
 			ID:        uid,
 			Name:      name,
@@ -349,6 +358,7 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 			Group:     "ingress.operator.openshift.io",
 			Version:   "v1",
 			Kind:      "DNSRecord",
+			Hostname:  dnsName,
 		}
 		graph.Nodes = append(graph.Nodes, node)
 		nodeMap[node.ID] = nodeIndex
@@ -425,6 +435,193 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 		nodeIndex++
 	}
 
+	// Extract DNS zones and assign them to nodes with hierarchical support
+	dnsZoneMap := make(map[string][]string)    // zone name -> node IDs
+	nodeZoneMap := make(map[string][]string)   // node ID -> all zones it belongs to
+	nodePrimaryZone := make(map[string]string) // node ID -> primary (most specific) zone
+
+	// Collect all DNSRecord hostnames to identify specific records
+	dnsRecordHostnames := make(map[string]string) // hostname -> DNSRecord UID
+
+	// First, collect all hostnames and their hierarchical zones from DNSRecords
+	for _, dns := range resources.DNSRecords {
+		dnsName, _, _ := unstructured.NestedString(dns.Object, "spec", "dnsName")
+		dnsUID, _, _ := unstructured.NestedString(dns.Object, "metadata", "uid")
+
+		// Remove trailing dot if present
+		if strings.HasSuffix(dnsName, ".") {
+			dnsName = strings.TrimSuffix(dnsName, ".")
+		}
+
+		if dnsName != "" {
+			dnsRecordHostnames[dnsName] = dnsUID
+
+			zones := h.extractHierarchicalZones(dnsName)
+			if len(zones) > 0 {
+				// Assign to all valid hierarchical zones
+				for _, zone := range zones {
+					dnsZoneMap[zone] = append(dnsZoneMap[zone], dnsUID)
+					nodeZoneMap[dnsUID] = append(nodeZoneMap[dnsUID], zone)
+				}
+				// Set primary zone (most specific)
+				if len(zones) > 0 {
+					nodePrimaryZone[dnsUID] = zones[0]
+					log.Printf("DNSRecord %s (%s) assigned to zones %v, primary: %s", dnsName, dnsUID, zones, zones[0])
+				}
+			}
+		}
+	}
+
+	// Process HTTPRoutes and assign them to hierarchical zones based on their hostnames
+	for _, route := range resources.HTTPRoutes {
+		routeID := string(route.UID)
+
+		// Check all hostnames in the HTTPRoute
+		for _, hostname := range route.Spec.Hostnames {
+			hostnameStr := string(hostname)
+
+			// If this exact hostname has a DNSRecord, assign to all the same zones as the DNSRecord
+			if dnsUID, hasSpecificDNSRecord := dnsRecordHostnames[hostnameStr]; hasSpecificDNSRecord {
+				// Use the same zones as the DNSRecord
+				if dnsZones, exists := nodeZoneMap[dnsUID]; exists {
+					for _, zone := range dnsZones {
+						dnsZoneMap[zone] = append(dnsZoneMap[zone], routeID)
+						nodeZoneMap[routeID] = append(nodeZoneMap[routeID], zone)
+					}
+					if primaryZone, exists := nodePrimaryZone[dnsUID]; exists {
+						nodePrimaryZone[routeID] = primaryZone
+					}
+					log.Printf("HTTPRoute %s/%s (%s) assigned to zones %v (matches DNSRecord)", route.Namespace, route.Name, routeID, dnsZones)
+					break
+				}
+			}
+
+			zones := h.extractHierarchicalZones(hostnameStr)
+			if len(zones) > 0 {
+				// Assign to all hierarchical zones
+				for _, zone := range zones {
+					dnsZoneMap[zone] = append(dnsZoneMap[zone], routeID)
+					nodeZoneMap[routeID] = append(nodeZoneMap[routeID], zone)
+				}
+				// Set primary zone (most specific)
+				if _, exists := nodePrimaryZone[routeID]; !exists {
+					nodePrimaryZone[routeID] = zones[0]
+				}
+				log.Printf("HTTPRoute %s/%s (%s) assigned to zones %v, primary: %s", route.Namespace, route.Name, routeID, zones, zones[0])
+				break // Only process first hostname for primary zone assignment
+			}
+		}
+	}
+
+	// Process Gateway listeners and assign them to hierarchical zones based on their hostnames
+	for _, gw := range resources.Gateways {
+		for i, listener := range gw.Spec.Listeners {
+			listenerID := fmt.Sprintf("%s-listener-%d", string(gw.UID), i)
+
+			if listener.Hostname != nil {
+				hostnameStr := string(*listener.Hostname)
+
+				// If this exact hostname has a DNSRecord, assign to all the same zones as the DNSRecord
+				if dnsUID, hasSpecificDNSRecord := dnsRecordHostnames[hostnameStr]; hasSpecificDNSRecord {
+					// Use the same zones as the DNSRecord
+					if dnsZones, exists := nodeZoneMap[dnsUID]; exists {
+						for _, zone := range dnsZones {
+							dnsZoneMap[zone] = append(dnsZoneMap[zone], listenerID)
+							nodeZoneMap[listenerID] = append(nodeZoneMap[listenerID], zone)
+						}
+						if primaryZone, exists := nodePrimaryZone[dnsUID]; exists {
+							nodePrimaryZone[listenerID] = primaryZone
+						}
+						log.Printf("Gateway listener %s (%s) assigned to zones %v (matches DNSRecord)", gw.Name, listenerID, dnsZones)
+						continue
+					}
+				}
+
+				zones := h.extractHierarchicalZones(hostnameStr)
+				if len(zones) > 0 {
+					// Assign to all hierarchical zones
+					for _, zone := range zones {
+						dnsZoneMap[zone] = append(dnsZoneMap[zone], listenerID)
+						nodeZoneMap[listenerID] = append(nodeZoneMap[listenerID], zone)
+					}
+					// Set primary zone (most specific)
+					if _, exists := nodePrimaryZone[listenerID]; !exists {
+						nodePrimaryZone[listenerID] = zones[0]
+					}
+					log.Printf("Gateway listener %s (%s) assigned to zones %v, primary: %s", gw.Name, listenerID, zones, zones[0])
+				}
+			}
+		}
+	}
+
+	// Update nodes with their DNS zone information (use primary zone)
+	for i := range graph.Nodes {
+		if primaryZone, exists := nodePrimaryZone[graph.Nodes[i].ID]; exists {
+			graph.Nodes[i].DNSZone = primaryZone
+		}
+	}
+
+	// Create DNS zone objects with colors, but only for zones that provide meaningful separation
+	zoneColors := []string{"#e3f2fd", "#f3e5f5", "#e8f5e8", "#fff3e0", "#fce4ec", "#e0f2f1", "#f9fbe7", "#fff8e1"}
+	colorIndex := 0
+
+	log.Printf("DNS Zone Summary:")
+
+	// Sort zones by specificity (most specific first) to prioritize meaningful zones
+	type zoneInfo struct {
+		name    string
+		nodeIDs []string
+		depth   int
+	}
+
+	var zones []zoneInfo
+	for zoneName, nodeIDs := range dnsZoneMap {
+		zones = append(zones, zoneInfo{
+			name:    zoneName,
+			nodeIDs: nodeIDs,
+			depth:   len(strings.Split(zoneName, ".")),
+		})
+		log.Printf("  Zone %s: %d nodes - %v", zoneName, len(nodeIDs), nodeIDs)
+	}
+
+	// Sort by depth (most specific first)
+	sort.Slice(zones, func(i, j int) bool {
+		return zones[i].depth > zones[j].depth
+	})
+
+	for _, zoneInfo := range zones {
+		// Create all zones that have nodes, allowing hierarchical overlap
+		// Only skip zones that would be identical to other zones (no meaningful separation)
+		shouldCreateZone := true
+
+		// Skip zones that are identical to a more specific zone
+		for _, otherZone := range zones {
+			if otherZone.depth > zoneInfo.depth && len(otherZone.nodeIDs) == len(zoneInfo.nodeIDs) {
+				// Check if node sets are identical
+				if h.slicesEqual(otherZone.nodeIDs, zoneInfo.nodeIDs) {
+					shouldCreateZone = false
+					break
+				}
+			}
+		}
+
+		if shouldCreateZone {
+			zone := types.DNSZone{
+				Name:  zoneInfo.name,
+				Nodes: zoneInfo.nodeIDs,
+				Color: zoneColors[colorIndex%len(zoneColors)],
+			}
+			graph.DNSZones = append(graph.DNSZones, zone)
+			colorIndex++
+
+			log.Printf("Created DNS zone %s with %d nodes: %v", zoneInfo.name, len(zoneInfo.nodeIDs), zoneInfo.nodeIDs)
+		} else {
+			log.Printf("Skipped DNS zone %s (identical to more specific zone)", zoneInfo.name)
+		}
+	}
+
+	log.Printf("Total DNS zones created: %d", len(graph.DNSZones))
+
 	// Link HTTPRoutes to Services via backendRefs
 	for _, route := range resources.HTTPRoutes {
 		for _, rule := range route.Spec.Rules {
@@ -452,6 +649,225 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 	}
 
 	return graph
+}
+
+// hostnamesMatch checks if a DNS name matches a hostname pattern
+// Supports exact matches and basic wildcard matching
+func (h *Handler) hostnamesMatch(dnsName, routeHostname string) bool {
+	// Exact match
+	if dnsName == routeHostname {
+		return true
+	}
+
+	// Wildcard matching - if route hostname starts with "*."
+	if strings.HasPrefix(routeHostname, "*.") {
+		wildcardDomain := strings.TrimPrefix(routeHostname, "*.")
+		// Check if DNS name ends with the wildcard domain
+		if strings.HasSuffix(dnsName, "."+wildcardDomain) || dnsName == wildcardDomain {
+			return true
+		}
+	}
+
+	// Check if DNS name matches subdomain pattern
+	if strings.HasPrefix(dnsName, routeHostname+".") {
+		return true
+	}
+
+	return false
+}
+
+// extractDNSZone extracts the DNS zone from a hostname with intelligent granularity
+// Examples:
+// - api.example.com -> example.com
+// - *.gwapi.apps.ci-ln-xyz.gcp-2.ci.openshift.org -> gwapi.apps.ci-ln-xyz.gcp-2.ci.openshift.org
+// - foo.abc.apps.ci-ln-xyz.gcp-2.ci.openshift.org -> abc.apps.ci-ln-xyz.gcp-2.ci.openshift.org
+func (h *Handler) extractDNSZone(hostname string) string {
+	if hostname == "" {
+		return ""
+	}
+
+	// Remove wildcard prefix if present
+	if strings.HasPrefix(hostname, "*.") {
+		hostname = strings.TrimPrefix(hostname, "*.")
+	}
+
+	// Split hostname into parts
+	parts := strings.Split(hostname, ".")
+	if len(parts) < 2 {
+		return hostname // Single part, treat as zone itself
+	}
+
+	// Special handling for OpenShift/Kubernetes style domains
+	// Pattern: [subdomain.]service.apps.cluster-name.domain.tld
+	if h.isOpenShiftStyleDomain(parts) {
+		return h.extractOpenShiftZone(parts)
+	}
+
+	// Special handling for internal cluster domains
+	// Pattern: service.namespace.svc.cluster.local
+	if h.isClusterInternalDomain(parts) {
+		return h.extractClusterInternalZone(parts)
+	}
+
+	// For standard domains, use different granularity based on domain length
+	if len(parts) >= 6 {
+		// Very long domains - use last 4 parts for more granularity
+		return strings.Join(parts[len(parts)-4:], ".")
+	} else if len(parts) >= 4 {
+		// Medium domains - use last 3 parts
+		return strings.Join(parts[len(parts)-3:], ".")
+	} else {
+		// Short domains - use last 2 parts (standard)
+		return strings.Join(parts[len(parts)-2:], ".")
+	}
+}
+
+// isOpenShiftStyleDomain checks if this looks like an OpenShift cluster domain
+// Pattern: *.apps.cluster-name.provider.region.domain.tld
+func (h *Handler) isOpenShiftStyleDomain(parts []string) bool {
+	if len(parts) < 6 {
+		return false
+	}
+
+	// Look for common OpenShift patterns
+	for i, part := range parts {
+		if part == "apps" && i > 0 && i < len(parts)-3 {
+			// Check if it looks like: something.apps.cluster.domain.tld
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractOpenShiftZone extracts zone for OpenShift style domains
+// *.gwapi.apps.cluster -> gwapi.apps.cluster...
+// foo.abc.apps.cluster -> abc.apps.cluster...
+func (h *Handler) extractOpenShiftZone(parts []string) string {
+	// Find the "apps" part
+	appsIndex := -1
+	for i, part := range parts {
+		if part == "apps" {
+			appsIndex = i
+			break
+		}
+	}
+
+	if appsIndex == -1 {
+		// Fallback to standard extraction
+		return strings.Join(parts[len(parts)-3:], ".")
+	}
+
+	// Extract the service/application part before "apps"
+	if appsIndex > 0 {
+		// Include from the service level: service.apps.cluster.domain.tld
+		return strings.Join(parts[appsIndex-1:], ".")
+	} else {
+		// apps is at the beginning, use everything
+		return strings.Join(parts, ".")
+	}
+}
+
+// isClusterInternalDomain checks for Kubernetes internal domains
+// Pattern: service.namespace.svc.cluster.local
+func (h *Handler) isClusterInternalDomain(parts []string) bool {
+	if len(parts) < 3 {
+		return false
+	}
+
+	// Look for cluster.local or svc.cluster.local patterns
+	return (len(parts) >= 2 && parts[len(parts)-2] == "cluster" && parts[len(parts)-1] == "local") ||
+		(len(parts) >= 4 && parts[len(parts)-4] == "svc" && parts[len(parts)-2] == "cluster" && parts[len(parts)-1] == "local")
+}
+
+// extractClusterInternalZone extracts zone for cluster internal domains
+// service.namespace.svc.cluster.local -> namespace.svc.cluster.local
+func (h *Handler) extractClusterInternalZone(parts []string) string {
+	if len(parts) >= 4 && parts[len(parts)-4] == "svc" {
+		// service.namespace.svc.cluster.local -> namespace.svc.cluster.local
+		return strings.Join(parts[len(parts)-4:], ".")
+	}
+
+	// Fallback
+	return strings.Join(parts[len(parts)-3:], ".")
+}
+
+// extractHierarchicalZones extracts all possible DNS zones from a hostname in hierarchical order
+// Examples: foo.abc.apps.ci-ln-xyz.gcp-2.ci.openshift.org returns:
+// - abc.apps.ci-ln-xyz.gcp-2.ci.openshift.org (most specific)
+// - apps.ci-ln-xyz.gcp-2.ci.openshift.org
+// - ci-ln-xyz.gcp-2.ci.openshift.org
+// - gcp-2.ci.openshift.org (broader)
+// - ci.openshift.org
+// - openshift.org (broadest)
+func (h *Handler) extractHierarchicalZones(hostname string) []string {
+	if hostname == "" {
+		return nil
+	}
+
+	// Remove wildcard prefix if present
+	if strings.HasPrefix(hostname, "*.") {
+		hostname = strings.TrimPrefix(hostname, "*.")
+	}
+
+	// Split hostname into parts
+	parts := strings.Split(hostname, ".")
+	if len(parts) < 2 {
+		return []string{hostname}
+	}
+
+	var zones []string
+
+	// For OpenShift style domains, create hierarchical zones
+	if h.isOpenShiftStyleDomain(parts) {
+		// Find the "apps" part
+		appsIndex := -1
+		for i, part := range parts {
+			if part == "apps" {
+				appsIndex = i
+				break
+			}
+		}
+
+		if appsIndex > 0 {
+			// Start from the service level and work up
+			// foo.abc.apps.cluster -> abc.apps.cluster, apps.cluster, cluster...
+			for i := appsIndex - 1; i < len(parts)-1; i++ {
+				if i >= 0 {
+					zone := strings.Join(parts[i:], ".")
+					zones = append(zones, zone)
+				}
+			}
+		}
+	} else {
+		// For regular domains, create zones from specific to general
+		// api.service.example.com -> service.example.com, example.com
+		for i := len(parts) - 2; i >= 0; i-- {
+			if i < len(parts)-1 { // Don't include the full hostname itself
+				zone := strings.Join(parts[i:], ".")
+				zones = append(zones, zone)
+			}
+		}
+	}
+
+	// Remove duplicates and ensure we have at least the basic zone
+	uniqueZones := make(map[string]bool)
+	var result []string
+
+	for _, zone := range zones {
+		if !uniqueZones[zone] && zone != "" {
+			uniqueZones[zone] = true
+			result = append(result, zone)
+		}
+	}
+
+	// Ensure we have at least the basic zone extraction as fallback
+	basicZone := h.extractDNSZone(hostname)
+	if !uniqueZones[basicZone] && basicZone != "" {
+		result = append(result, basicZone)
+	}
+
+	return result
 }
 
 // GetResourceDetails returns detailed information about a specific resource
@@ -533,4 +949,32 @@ func (h *Handler) UpdateResource(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "resource updated successfully"})
+}
+
+// slicesEqual checks if two string slices contain the same elements (order doesn't matter)
+func (h *Handler) slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	// Create maps to count occurrences
+	countA := make(map[string]int)
+	countB := make(map[string]int)
+
+	for _, item := range a {
+		countA[item]++
+	}
+
+	for _, item := range b {
+		countB[item]++
+	}
+
+	// Compare maps
+	for key, count := range countA {
+		if countB[key] != count {
+			return false
+		}
+	}
+
+	return true
 }
