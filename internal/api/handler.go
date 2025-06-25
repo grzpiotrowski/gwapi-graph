@@ -453,3 +453,84 @@ func (h *Handler) buildGraph(resources *types.ResourceCollection) *types.Graph {
 
 	return graph
 }
+
+// GetResourceDetails returns detailed information about a specific resource
+func (h *Handler) GetResourceDetails(c *gin.Context) {
+	resourceType := c.Param("type")
+	resourceName := c.Param("name")
+	namespace := c.Query("namespace")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var resource interface{}
+	var err error
+
+	switch resourceType {
+	case "gatewayclass":
+		resource, err = h.k8sClient.GetGatewayClass(ctx, resourceName)
+	case "gateway":
+		resource, err = h.k8sClient.GetGateway(ctx, namespace, resourceName)
+	case "httproute":
+		resource, err = h.k8sClient.GetHTTPRoute(ctx, namespace, resourceName)
+	case "referencegrant":
+		resource, err = h.k8sClient.GetReferenceGrant(ctx, namespace, resourceName)
+	case "service":
+		resource, err = h.k8sClient.GetService(ctx, namespace, resourceName)
+	case "dnsrecord":
+		resource, err = h.k8sClient.GetDNSRecord(ctx, namespace, resourceName)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported resource type"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, resource)
+}
+
+// UpdateResource updates a specific resource
+func (h *Handler) UpdateResource(c *gin.Context) {
+	resourceType := c.Param("type")
+	resourceName := c.Param("name")
+	namespace := c.Query("namespace")
+
+	var rawResource map[string]interface{}
+	if err := c.ShouldBindJSON(&rawResource); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid JSON"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var err error
+
+	switch resourceType {
+	case "gatewayclass":
+		err = h.k8sClient.UpdateGatewayClass(ctx, resourceName, rawResource)
+	case "gateway":
+		err = h.k8sClient.UpdateGateway(ctx, namespace, resourceName, rawResource)
+	case "httproute":
+		err = h.k8sClient.UpdateHTTPRoute(ctx, namespace, resourceName, rawResource)
+	case "referencegrant":
+		err = h.k8sClient.UpdateReferenceGrant(ctx, namespace, resourceName, rawResource)
+	case "service":
+		err = h.k8sClient.UpdateService(ctx, namespace, resourceName, rawResource)
+	case "dnsrecord":
+		err = h.k8sClient.UpdateDNSRecord(ctx, namespace, resourceName, rawResource)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported resource type"})
+		return
+	}
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "resource updated successfully"})
+}

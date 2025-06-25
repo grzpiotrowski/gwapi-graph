@@ -473,26 +473,33 @@ class GatewayGraphVisualizer {
             return;
         }
 
+        // Show basic info immediately
+        this.showBasicNodeInfo(node);
+        
+        // Skip detailed loading for Listener nodes (they don't have full K8s resources)
+        if (node.type === 'Listener') {
+            return;
+        }
+        
+        // Load detailed resource information
+        this.loadResourceDetails(node);
+    }
+
+    showBasicNodeInfo(node) {
+        const infoContent = document.getElementById('info-content');
+        
         let html = `
             <h4>${node.type}</h4>
-            <div class="key-value">
-                <span class="key">Name:</span>
+            <div class="resource-metadata">
+                <span class="label">Name:</span>
                 <span class="value">${node.name}</span>
-            </div>
-            <div class="key-value">
-                <span class="key">Namespace:</span>
+                <span class="label">Namespace:</span>
                 <span class="value">${node.namespace || 'cluster-scoped'}</span>
-            </div>
-            <div class="key-value">
-                <span class="key">Kind:</span>
+                <span class="label">Kind:</span>
                 <span class="value">${node.kind}</span>
-            </div>
-            <div class="key-value">
-                <span class="key">Group:</span>
+                <span class="label">Group:</span>
                 <span class="value">${node.group}</span>
-            </div>
-            <div class="key-value">
-                <span class="key">Version:</span>
+                <span class="label">Version:</span>
                 <span class="value">${node.version}</span>
             </div>
         `;
@@ -500,29 +507,22 @@ class GatewayGraphVisualizer {
         // Add listener-specific information
         if (node.type === 'Listener' && node.listenerData) {
             html += `
-                <div class="key-value">
-                    <span class="key">Port:</span>
-                    <span class="value">${node.listenerData.port}</span>
-                </div>
-                <div class="key-value">
-                    <span class="key">Protocol:</span>
-                    <span class="value">${node.listenerData.protocol}</span>
-                </div>
-            `;
-            
-            if (node.listenerData.hostname) {
-                html += `
-                    <div class="key-value">
-                        <span class="key">Hostname:</span>
-                        <span class="value">${node.listenerData.hostname}</span>
+                <div class="resource-section">
+                    <h5>Listener Configuration</h5>
+                    <div class="resource-section-content">
+                        <div class="resource-metadata">
+                            <span class="label">Port:</span>
+                            <span class="value">${node.listenerData.port}</span>
+                            <span class="label">Protocol:</span>
+                            <span class="value">${node.listenerData.protocol}</span>
+                            ${node.listenerData.hostname ? `
+                                <span class="label">Hostname:</span>
+                                <span class="value">${node.listenerData.hostname}</span>
+                            ` : ''}
+                            <span class="label">TLS:</span>
+                            <span class="value">${node.listenerData.tls ? 'Yes' : 'No'}</span>
+                        </div>
                     </div>
-                `;
-            }
-            
-            html += `
-                <div class="key-value">
-                    <span class="key">TLS:</span>
-                    <span class="value">${node.listenerData.tls ? 'Yes' : 'No'}</span>
                 </div>
             `;
         }
@@ -534,22 +534,452 @@ class GatewayGraphVisualizer {
             );
             if (listenerNodes.length > 0) {
                 html += `
-                    <div class="key-value">
-                        <span class="key">Listeners:</span>
-                        <span class="value">${listenerNodes.length}</span>
+                    <div class="resource-section">
+                        <h5>Listeners (${listenerNodes.length})</h5>
+                        <div class="resource-section-content">
+                            ${listenerNodes.map(listener => `
+                                <div style="margin-bottom: 0.5rem;">
+                                    <strong>Port ${listener.listenerData.port}</strong> (${listener.listenerData.protocol})
+                                    ${listener.listenerData.hostname ? ` - ${listener.listenerData.hostname}` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
                     </div>
                 `;
             }
         }
 
+        infoContent.innerHTML = html;
+    }
+
+    async loadResourceDetails(node) {
+        const infoContent = document.getElementById('info-content');
+        
+        // Show loading indicator
+        const loadingHtml = infoContent.innerHTML + `
+            <div class="resource-section">
+                <h5><span class="loading-spinner"></span>Loading detailed information...</h5>
+            </div>
+        `;
+        infoContent.innerHTML = loadingHtml;
+
+        try {
+            const resourceType = node.type.toLowerCase();
+            const url = `/api/resource/${resourceType}/${node.name}${node.namespace ? `?namespace=${node.namespace}` : ''}`;
+            
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`Failed to load resource details: ${response.status}`);
+            }
+            
+            const resourceData = await response.json();
+            this.showDetailedResourceInfo(node, resourceData);
+            
+        } catch (error) {
+            console.error('Error loading resource details:', error);
+            this.showResourceError(node, error.message);
+        }
+    }
+
+    showDetailedResourceInfo(node, resourceData) {
+        const infoContent = document.getElementById('info-content');
+        
+        let html = `
+            <h4>${node.type}</h4>
+            <div class="resource-metadata">
+                <span class="label">Name:</span>
+                <span class="value">${node.name}</span>
+                <span class="label">Namespace:</span>
+                <span class="value">${node.namespace || 'cluster-scoped'}</span>
+                <span class="label">Kind:</span>
+                <span class="value">${node.kind}</span>
+                <span class="label">Group:</span>
+                <span class="value">${node.group}</span>
+                <span class="label">Version:</span>
+                <span class="value">${node.version}</span>
+            </div>
+        `;
+
+        // Add metadata section
+        if (resourceData.metadata) {
+            html += `
+                <div class="resource-section">
+                    <h5>Metadata</h5>
+                    <div class="resource-section-content">
+                        <div class="resource-metadata">
+                            ${resourceData.metadata.uid ? `
+                                <span class="label">UID:</span>
+                                <span class="value">${resourceData.metadata.uid}</span>
+                            ` : ''}
+                            ${resourceData.metadata.creationTimestamp ? `
+                                <span class="label">Created:</span>
+                                <span class="value">${new Date(resourceData.metadata.creationTimestamp).toLocaleString()}</span>
+                            ` : ''}
+                            ${resourceData.metadata.resourceVersion ? `
+                                <span class="label">Resource Version:</span>
+                                <span class="value">${resourceData.metadata.resourceVersion}</span>
+                            ` : ''}
+                        </div>
+                        ${resourceData.metadata.labels ? `
+                            <div style="margin-top: 1rem;">
+                                <strong>Labels:</strong>
+                                <div style="margin-top: 0.5rem; font-family: monospace; font-size: 0.8rem;">
+                                    ${Object.entries(resourceData.metadata.labels).map(([key, value]) => 
+                                        `<div>${key}: ${value}</div>`
+                                    ).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+                        ${resourceData.metadata.annotations ? `
+                            <div style="margin-top: 1rem;">
+                                <strong>Annotations:</strong>
+                                <div style="margin-top: 0.5rem; font-family: monospace; font-size: 0.8rem;">
+                                    ${Object.entries(resourceData.metadata.annotations).map(([key, value]) => 
+                                        `<div>${key}: ${value}</div>`
+                                    ).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Add status section
+        if (resourceData.status) {
+            html += `
+                <div class="resource-section">
+                    <h5>Status</h5>
+                    <div class="resource-section-content">
+                        ${this.formatStatus(resourceData.status)}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Add spec section
+        if (resourceData.spec) {
+            html += `
+                <div class="resource-section">
+                    <h5>Specification</h5>
+                    <div class="resource-section-content">
+                        ${this.formatSpec(resourceData.spec, node.type)}
+                    </div>
+                </div>
+            `;
+        }
+
+        // Add edit controls
         html += `
-            <div class="key-value">
-                <span class="key">ID:</span>
-                <span class="value">${node.id}</span>
+            <div class="edit-controls">
+                <button class="btn-primary" onclick="window.gatewayGraph.startEditing('${node.type}', '${node.name}', '${node.namespace || ''}')">
+                    Edit Resource
+                </button>
+                <button class="btn-secondary" onclick="window.gatewayGraph.viewFullYaml('${node.type}', '${node.name}', '${node.namespace || ''}')">
+                    View Full YAML
+                </button>
+            </div>
+        `;
+
+        infoContent.innerHTML = html;
+    }
+
+    formatStatus(status) {
+        let html = '';
+        
+        // Handle different types of status
+        if (status.conditions) {
+            html += '<div><strong>Conditions:</strong></div>';
+            status.conditions.forEach(condition => {
+                const statusClass = condition.status === 'True' ? 'status-ready' : 
+                                  condition.status === 'False' ? 'status-error' : 'status-unknown';
+                html += `
+                    <div style="margin: 0.5rem 0; padding: 0.5rem; background: #f8f9fa; border-radius: 4px;">
+                        <div><span class="status-indicator ${statusClass}"></span><strong>${condition.type}</strong></div>
+                        <div style="font-size: 0.85rem; margin-top: 0.25rem;">Status: ${condition.status}</div>
+                        ${condition.reason ? `<div style="font-size: 0.85rem;">Reason: ${condition.reason}</div>` : ''}
+                        ${condition.message ? `<div style="font-size: 0.85rem;">Message: ${condition.message}</div>` : ''}
+                    </div>
+                `;
+            });
+        }
+        
+        // Add other status fields
+        Object.entries(status).forEach(([key, value]) => {
+            if (key !== 'conditions' && value !== null && value !== undefined) {
+                html += `<div style="margin: 0.25rem 0;"><strong>${key}:</strong> ${JSON.stringify(value)}</div>`;
+            }
+        });
+        
+        return html || '<div>No status information available</div>';
+    }
+
+    formatSpec(spec, resourceType) {
+        // Format spec based on resource type for better readability
+        let html = '<pre style="background: #f8f9fa; padding: 0.75rem; border-radius: 4px; font-size: 0.8rem; overflow-x: auto;">';
+        html += JSON.stringify(spec, null, 2);
+        html += '</pre>';
+        return html;
+    }
+
+    showResourceError(node, errorMessage) {
+        const infoContent = document.getElementById('info-content');
+        
+        let html = `
+            <h4>${node.type}</h4>
+            <div class="resource-metadata">
+                <span class="label">Name:</span>
+                <span class="value">${node.name}</span>
+                <span class="label">Namespace:</span>
+                <span class="value">${node.namespace || 'cluster-scoped'}</span>
+            </div>
+            <div class="error-message">
+                Failed to load detailed resource information: ${errorMessage}
             </div>
         `;
         
         infoContent.innerHTML = html;
+    }
+
+    async startEditing(resourceType, resourceName, namespace) {
+        const infoContent = document.getElementById('info-content');
+        
+        // Show loading
+        infoContent.innerHTML = `
+            <div class="resource-section">
+                <h5><span class="loading-spinner"></span>Loading resource for editing...</h5>
+            </div>
+        `;
+
+        try {
+            const url = `/api/resource/${resourceType.toLowerCase()}/${resourceName}${namespace ? `?namespace=${namespace}` : ''}`;
+            const response = await fetch(url);
+            
+            if (!response.ok) {
+                throw new Error(`Failed to load resource: ${response.status}`);
+            }
+            
+            const resourceData = await response.json();
+            this.showEditingInterface(resourceType, resourceName, namespace, resourceData);
+            
+        } catch (error) {
+            console.error('Error loading resource for editing:', error);
+            infoContent.innerHTML = `
+                <div class="error-message">
+                    Failed to load resource for editing: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    showEditingInterface(resourceType, resourceName, namespace, resourceData) {
+        const infoContent = document.getElementById('info-content');
+        
+        // Create a clean, editable version (like 'oc edit' does)
+        const editableResource = this.createEditableResource(resourceData);
+        const yamlContent = this.resourceToYaml(editableResource);
+        
+        const html = `
+            <h4>Edit ${resourceType}: ${resourceName}</h4>
+            <div class="resource-section">
+                <h5>⚠️ Important Notes</h5>
+                <div class="resource-section-content">
+                    <div style="background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 4px; padding: 0.75rem; margin-bottom: 1rem; font-size: 0.9rem;">
+                        <strong>Immutable Fields:</strong> You cannot change:
+                        <ul style="margin: 0.5rem 0 0 1.5rem;">
+                            <li>Resource name (metadata.name)</li>
+                            <li>Namespace (metadata.namespace)</li>
+                        </ul>
+                        <strong>What you can change:</strong> spec, labels, annotations
+                        ${namespace && (namespace.includes('openshift') || namespace.includes('system')) ? `
+                            <br/><br/>
+                            <strong style="color: #d63384;">⚠️ Warning:</strong> This resource is in a system namespace (${namespace}). 
+                            Changes may be reverted by system operators.
+                        ` : ''}
+                    </div>
+                </div>
+            </div>
+            <div class="resource-section">
+                <h5>Resource YAML (Editable)</h5>
+                <div class="resource-section-content">
+                    <textarea class="yaml-editor" id="yaml-editor">${yamlContent}</textarea>
+                </div>
+            </div>
+            <div class="edit-controls">
+                <button class="btn-success" onclick="window.gatewayGraph.saveResource('${resourceType}', '${resourceName}', '${namespace}')">
+                    <span id="save-spinner" style="display: none;" class="loading-spinner"></span>
+                    Save Changes
+                </button>
+                <button class="btn-secondary" onclick="window.gatewayGraph.cancelEditing('${resourceType}', '${resourceName}', '${namespace}')">
+                    Cancel
+                </button>
+                <button class="btn-secondary" onclick="window.gatewayGraph.viewFullYaml('${resourceType}', '${resourceName}', '${namespace}')">
+                    View Full YAML
+                </button>
+            </div>
+            <div id="edit-messages"></div>
+        `;
+        
+        infoContent.innerHTML = html;
+    }
+
+    async saveResource(resourceType, resourceName, namespace) {
+        const yamlEditor = document.getElementById('yaml-editor');
+        const saveSpinner = document.getElementById('save-spinner');
+        const messagesDiv = document.getElementById('edit-messages');
+        
+        // Show loading
+        saveSpinner.style.display = 'inline-block';
+        messagesDiv.innerHTML = '';
+        
+        try {
+            // Parse YAML back to JSON
+            const resourceData = this.yamlToResource(yamlEditor.value);
+            
+            const url = `/api/resource/${resourceType.toLowerCase()}/${resourceName}${namespace ? `?namespace=${namespace}` : ''}`;
+            const response = await fetch(url, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(resourceData)
+            });
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || `Failed to update resource: ${response.status}`);
+            }
+            
+            // Show success message
+            messagesDiv.innerHTML = '<div class="success-message">Resource updated successfully!</div>';
+            
+            // Refresh the graph to show updated data
+            setTimeout(() => {
+                this.loadData();
+                // Go back to view mode
+                this.cancelEditing(resourceType, resourceName, namespace);
+            }, 1500);
+            
+        } catch (error) {
+            console.error('Error saving resource:', error);
+            messagesDiv.innerHTML = `<div class="error-message">Failed to save resource: ${error.message}</div>`;
+        } finally {
+            saveSpinner.style.display = 'none';
+        }
+    }
+
+    cancelEditing(resourceType, resourceName, namespace) {
+        // Find the node and reload its details
+        const node = this.nodes.find(n => 
+            n.type === resourceType && 
+            n.name === resourceName && 
+            (n.namespace || '') === (namespace || '')
+        );
+        
+        if (node) {
+            this.updateInfoPanel(node);
+        }
+    }
+
+
+
+    createEditableResource(resource) {
+        // Create a clean resource for editing, similar to what 'oc edit' shows
+        // Remove read-only fields and system-generated metadata
+        
+        const editable = {
+            apiVersion: resource.apiVersion || 'v1',
+            kind: resource.kind || 'Unknown',
+            metadata: {
+                name: resource.metadata?.name || 'unknown'
+            }
+        };
+
+        // Add namespace if present (skip for cluster-scoped resources)
+        if (resource.metadata?.namespace) {
+            editable.metadata.namespace = resource.metadata.namespace;
+        }
+
+        // Add editable metadata fields
+        if (resource.metadata?.labels && Object.keys(resource.metadata.labels).length > 0) {
+            editable.metadata.labels = { ...resource.metadata.labels };
+        }
+
+        if (resource.metadata?.annotations && Object.keys(resource.metadata.annotations).length > 0) {
+            editable.metadata.annotations = { ...resource.metadata.annotations };
+        }
+
+        // Add spec if present
+        if (resource.spec && Object.keys(resource.spec).length > 0) {
+            editable.spec = JSON.parse(JSON.stringify(resource.spec)); // Deep copy
+        }
+
+        return editable;
+    }
+
+    async viewFullYaml(resourceType, resourceName, namespace) {
+        const infoContent = document.getElementById('info-content');
+        
+        // Show loading
+        infoContent.innerHTML = `
+            <div class="resource-section">
+                <h5><span class="loading-spinner"></span>Loading full resource YAML...</h5>
+            </div>
+        `;
+
+        try {
+            const url = `/api/resource/${resourceType.toLowerCase()}/${resourceName}${namespace ? `?namespace=${namespace}` : ''}`;
+            const response = await fetch(url);
+            
+            if (!response.ok) {
+                throw new Error(`Failed to load resource: ${response.status}`);
+            }
+            
+            const resourceData = await response.json();
+            const yamlContent = this.resourceToYaml(resourceData);
+            
+            const html = `
+                <h4>${resourceType}: ${resourceName} (Full YAML)</h4>
+                <div class="resource-section">
+                    <h5>Complete Resource YAML (Read-Only)</h5>
+                    <div class="resource-section-content">
+                        <pre style="background: #f8f9fa; padding: 0.75rem; border-radius: 4px; font-size: 0.8rem; overflow-x: auto; white-space: pre-wrap;">${yamlContent}</pre>
+                    </div>
+                </div>
+                <div class="edit-controls">
+                    <button class="btn-primary" onclick="window.gatewayGraph.startEditing('${resourceType}', '${resourceName}', '${namespace}')">
+                        Edit Resource
+                    </button>
+                    <button class="btn-secondary" onclick="window.gatewayGraph.cancelEditing('${resourceType}', '${resourceName}', '${namespace}')">
+                        Back to Details
+                    </button>
+                </div>
+            `;
+            
+            infoContent.innerHTML = html;
+            
+        } catch (error) {
+            console.error('Error loading full YAML:', error);
+            infoContent.innerHTML = `
+                <div class="error-message">
+                    Failed to load full resource YAML: ${error.message}
+                </div>
+            `;
+        }
+    }
+
+    resourceToYaml(resource) {
+        // Simple JSON to YAML converter for basic formatting
+        return JSON.stringify(resource, null, 2);
+    }
+
+    yamlToResource(yamlString) {
+        // Simple YAML to JSON converter (assumes JSON format)
+        try {
+            return JSON.parse(yamlString);
+        } catch (error) {
+            throw new Error('Invalid JSON/YAML format');
+        }
     }
 
     showTooltip(event, text) {
@@ -621,5 +1051,5 @@ class GatewayGraphVisualizer {
 // Initialize the application when the DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM loaded, initializing Gateway Graph Visualizer...');
-    new GatewayGraphVisualizer();
+    window.gatewayGraph = new GatewayGraphVisualizer();
 }); 

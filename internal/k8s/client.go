@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 
@@ -137,4 +138,263 @@ func (c *Client) GetServices(ctx context.Context) ([]corev1.Service, error) {
 	}
 
 	return services.Items, nil
+}
+
+// GetGateway retrieves a specific Gateway resource
+func (c *Client) GetGateway(ctx context.Context, namespace, name string) (*gatewayv1.Gateway, error) {
+	gateway, err := c.gatewayClient.GatewayV1().Gateways(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gateway %s/%s: %w", namespace, name, err)
+	}
+	return gateway, nil
+}
+
+// GetHTTPRoute retrieves a specific HTTPRoute resource
+func (c *Client) GetHTTPRoute(ctx context.Context, namespace, name string) (*gatewayv1.HTTPRoute, error) {
+	route, err := c.gatewayClient.GatewayV1().HTTPRoutes(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get HTTPRoute %s/%s: %w", namespace, name, err)
+	}
+	return route, nil
+}
+
+// GetGatewayClass retrieves a specific GatewayClass resource
+func (c *Client) GetGatewayClass(ctx context.Context, name string) (*gatewayv1.GatewayClass, error) {
+	class, err := c.gatewayClient.GatewayV1().GatewayClasses().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GatewayClass %s: %w", name, err)
+	}
+	return class, nil
+}
+
+// GetReferenceGrant retrieves a specific ReferenceGrant resource
+func (c *Client) GetReferenceGrant(ctx context.Context, namespace, name string) (*gatewayv1beta1.ReferenceGrant, error) {
+	grant, err := c.gatewayClient.GatewayV1beta1().ReferenceGrants(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ReferenceGrant %s/%s: %w", namespace, name, err)
+	}
+	return grant, nil
+}
+
+// GetService retrieves a specific Service resource
+func (c *Client) GetService(ctx context.Context, namespace, name string) (*corev1.Service, error) {
+	service, err := c.k8sClient.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Service %s/%s: %w", namespace, name, err)
+	}
+	return service, nil
+}
+
+// GetDNSRecord retrieves a specific DNSRecord resource
+func (c *Client) GetDNSRecord(ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
+	gvr := schema.GroupVersionResource{
+		Group:    "ingress.operator.openshift.io",
+		Version:  "v1",
+		Resource: "dnsrecords",
+	}
+
+	resource, err := c.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get DNSRecord %s/%s: %w", namespace, name, err)
+	}
+	return resource, nil
+}
+
+// UpdateGateway updates a Gateway resource
+func (c *Client) UpdateGateway(ctx context.Context, namespace, name string, data map[string]interface{}) error {
+	// Get the existing resource first
+	existing, err := c.GetGateway(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Check for immutable field changes
+	if metadata, ok := data["metadata"]; ok {
+		if metadataMap, ok := metadata.(map[string]interface{}); ok {
+			if newName, exists := metadataMap["name"]; exists && newName != existing.Name {
+				return fmt.Errorf("cannot change resource name from '%s' to '%s' - resource names are immutable", existing.Name, newName)
+			}
+			if newNamespace, exists := metadataMap["namespace"]; exists && newNamespace != existing.Namespace {
+				return fmt.Errorf("cannot change resource namespace from '%s' to '%s' - resource namespaces are immutable", existing.Namespace, newNamespace)
+			}
+		}
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal spec: %w", err)
+		}
+		if err := json.Unmarshal(specBytes, &existing.Spec); err != nil {
+			return fmt.Errorf("failed to unmarshal spec: %w", err)
+		}
+	}
+
+	// Update mutable metadata fields (labels, annotations)
+	if metadata, ok := data["metadata"]; ok {
+		if metadataMap, ok := metadata.(map[string]interface{}); ok {
+			if labels, exists := metadataMap["labels"]; exists {
+				if labelsMap, ok := labels.(map[string]interface{}); ok {
+					stringLabels := make(map[string]string)
+					for k, v := range labelsMap {
+						if str, ok := v.(string); ok {
+							stringLabels[k] = str
+						}
+					}
+					existing.Labels = stringLabels
+				}
+			}
+
+			if annotations, exists := metadataMap["annotations"]; exists {
+				if annotationsMap, ok := annotations.(map[string]interface{}); ok {
+					stringAnnotations := make(map[string]string)
+					for k, v := range annotationsMap {
+						if str, ok := v.(string); ok {
+							stringAnnotations[k] = str
+						}
+					}
+					existing.Annotations = stringAnnotations
+				}
+			}
+		}
+	}
+
+	_, err = c.gatewayClient.GatewayV1().Gateways(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update Gateway %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+// UpdateHTTPRoute updates an HTTPRoute resource
+func (c *Client) UpdateHTTPRoute(ctx context.Context, namespace, name string, data map[string]interface{}) error {
+	// Get the existing resource first
+	existing, err := c.GetHTTPRoute(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal spec: %w", err)
+		}
+		if err := json.Unmarshal(specBytes, &existing.Spec); err != nil {
+			return fmt.Errorf("failed to unmarshal spec: %w", err)
+		}
+	}
+
+	_, err = c.gatewayClient.GatewayV1().HTTPRoutes(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update HTTPRoute %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+// UpdateGatewayClass updates a GatewayClass resource
+func (c *Client) UpdateGatewayClass(ctx context.Context, name string, data map[string]interface{}) error {
+	// Get the existing resource first
+	existing, err := c.GetGatewayClass(ctx, name)
+	if err != nil {
+		return err
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal spec: %w", err)
+		}
+		if err := json.Unmarshal(specBytes, &existing.Spec); err != nil {
+			return fmt.Errorf("failed to unmarshal spec: %w", err)
+		}
+	}
+
+	_, err = c.gatewayClient.GatewayV1().GatewayClasses().Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update GatewayClass %s: %w", name, err)
+	}
+	return nil
+}
+
+// UpdateReferenceGrant updates a ReferenceGrant resource
+func (c *Client) UpdateReferenceGrant(ctx context.Context, namespace, name string, data map[string]interface{}) error {
+	// Get the existing resource first
+	existing, err := c.GetReferenceGrant(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal spec: %w", err)
+		}
+		if err := json.Unmarshal(specBytes, &existing.Spec); err != nil {
+			return fmt.Errorf("failed to unmarshal spec: %w", err)
+		}
+	}
+
+	_, err = c.gatewayClient.GatewayV1beta1().ReferenceGrants(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update ReferenceGrant %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+// UpdateService updates a Service resource
+func (c *Client) UpdateService(ctx context.Context, namespace, name string, data map[string]interface{}) error {
+	// Get the existing resource first
+	existing, err := c.GetService(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		specBytes, err := json.Marshal(spec)
+		if err != nil {
+			return fmt.Errorf("failed to marshal spec: %w", err)
+		}
+		if err := json.Unmarshal(specBytes, &existing.Spec); err != nil {
+			return fmt.Errorf("failed to unmarshal spec: %w", err)
+		}
+	}
+
+	_, err = c.k8sClient.CoreV1().Services(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update Service %s/%s: %w", namespace, name, err)
+	}
+	return nil
+}
+
+// UpdateDNSRecord updates a DNSRecord resource
+func (c *Client) UpdateDNSRecord(ctx context.Context, namespace, name string, data map[string]interface{}) error {
+	gvr := schema.GroupVersionResource{
+		Group:    "ingress.operator.openshift.io",
+		Version:  "v1",
+		Resource: "dnsrecords",
+	}
+
+	// Get the existing resource first
+	existing, err := c.GetDNSRecord(ctx, namespace, name)
+	if err != nil {
+		return err
+	}
+
+	// Update the spec if provided
+	if spec, ok := data["spec"]; ok {
+		if err := unstructured.SetNestedField(existing.Object, spec, "spec"); err != nil {
+			return fmt.Errorf("failed to set spec: %w", err)
+		}
+	}
+
+	_, err = c.dynamicClient.Resource(gvr).Namespace(namespace).Update(ctx, existing, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to update DNSRecord %s/%s: %w", namespace, name, err)
+	}
+	return nil
 }
